@@ -1,0 +1,404 @@
+import * as React from "react";
+import { Animated, BackHandler, StyleSheet, View, Text } from "react-native";
+import produce from "immer";
+import hoistNonReactStatics from "hoist-non-react-statics";
+import * as animations from "./animations";
+import { last, lock, uid } from "./util";
+const {
+  Provider,
+  Consumer
+} = React.createContext();
+
+function makeStack(routes) {
+  routes = Array.isArray(routes) ? routes : [routes];
+  return {
+    key: "stack_" + uid(),
+    routes: routes.map(makeRoute),
+    value: new Animated.Value(routes.length - 1)
+  };
+}
+
+function makeRoute({
+  screen,
+  props
+}) {
+  return {
+    key: "screen_" + uid(),
+    screen,
+    props
+  };
+}
+
+function transition(value, toValue, animated, cb) {
+  if (animated === false) {
+    value.setValue(toValue);
+    cb === null || cb === void 0 ? void 0 : cb();
+  } else {
+    Animated.spring(value, {
+      friction: 26,
+      tension: 200,
+      useNativeDriver: true,
+      toValue
+    }).start(() => {
+      cb === null || cb === void 0 ? void 0 : cb();
+    });
+  }
+}
+
+export default class Navigator extends React.Component {
+  _actions = {
+    push: this.push.bind(this),
+    pop: this.pop.bind(this),
+    popTo: this.popTo.bind(this),
+    replace: this.replace.bind(this),
+    reset: this.reset.bind(this),
+    pushReset: this.pushReset.bind(this),
+    present: this.present.bind(this),
+    dismiss: this.dismiss.bind(this)
+  };
+
+  constructor(props) {
+    super(props);
+    let stacks = Array.isArray(props.initialState) ? props.initialState : [[props.initialState]];
+    this.state = {
+      stacks: stacks.map(makeStack),
+      value: new Animated.Value(stacks.length - 1)
+    };
+
+    this._willFocus(last(last(stacks)));
+  }
+
+  _willFocus({
+    screen,
+    props
+  }) {
+    if (this.props.onWillFocus) {
+      this.props.onWillFocus({
+        screen,
+        props
+      });
+    }
+  }
+
+  _pushRoute(route, animated, callback) {
+    this.setState(produce(function ({
+      stacks
+    }) {
+      last(stacks).routes.push(route);
+    }), () => {
+      let {
+        value,
+        routes
+      } = last(this.state.stacks);
+      transition(value, routes.length - 1, animated, () => {
+        callback();
+      });
+    });
+  }
+
+  _popRoutes(n, animated, callback) {
+    this.setState(produce(function ({
+      stacks
+    }) {
+      last(stacks).routes.splice(-n, n - 1);
+    }), () => {
+      let {
+        value,
+        routes
+      } = last(this.state.stacks);
+      value.setValue(routes.length - 1);
+      transition(value, routes.length - 2, animated, () => {
+        this.setState(produce(function ({
+          stacks
+        }) {
+          last(stacks).routes.pop();
+        }), () => {
+          callback();
+        });
+      });
+    });
+  }
+
+  _setStackRoutes(update, callback) {
+    this.setState(produce(function ({
+      stacks
+    }) {
+      let stack = last(stacks);
+      let routes = update(stack.routes);
+
+      if (routes) {
+        stack.routes = routes;
+      }
+    }), () => {
+      let {
+        value,
+        routes
+      } = last(this.state.stacks);
+      value.setValue(routes.length - 1);
+      callback();
+    });
+  }
+
+  push(route, options) {
+    if (lock.acquire()) {
+      this._willFocus(route);
+
+      this._pushRoute(makeRoute(route), options === null || options === void 0 ? void 0 : options.animated, () => {
+        lock.release();
+      });
+    }
+  }
+
+  pop(options) {
+    const {
+      routes
+    } = last(this.state.stacks);
+
+    if (routes.length === 1) {
+      this.dismiss(options);
+      return;
+    }
+
+    if (lock.acquire()) {
+      this._willFocus(routes[routes.length - 2]);
+
+      this._popRoutes(1, options === null || options === void 0 ? void 0 : options.animated, () => {
+        lock.release();
+      });
+    }
+  }
+
+  popTo(screen, options) {
+    let {
+      routes
+    } = last(this.state.stacks);
+    let index = routes.findIndex(route => route.screen === screen);
+
+    if (routes.length === 1 || index === -1) {
+      return;
+    }
+
+    if (lock.acquire()) {
+      this._willFocus(routes[index]);
+
+      this._popRoutes(routes.length - index - 1, options === null || options === void 0 ? void 0 : options.animated, () => {
+        lock.release();
+      });
+    }
+  }
+
+  replace(route, options) {
+    if (!lock.acquire()) {
+      return;
+    }
+
+    this._willFocus(route);
+
+    this._pushRoute(makeRoute(route), options === null || options === void 0 ? void 0 : options.animated, () => {
+      this._setStackRoutes(routes => {
+        routes.splice(-2, 1);
+      }, () => {
+        lock.release();
+      });
+    });
+  }
+  /**
+   * Resets the current stack with the new route, with an animation
+   * from the left
+   */
+
+
+  reset(route, options) {
+    if (!lock.acquire()) {
+      return;
+    }
+
+    this._willFocus(route);
+
+    this._setStackRoutes(routes => [makeRoute(route), routes[routes.length - 1]], () => {
+      this._popRoutes(1, options === null || options === void 0 ? void 0 : options.animated, () => {
+        lock.release();
+      });
+    });
+  }
+  /**
+   * Resets the current stack with the new screen, with an animation
+   * from the right
+   */
+
+
+  pushReset(route, options) {
+    if (!lock.acquire()) {
+      return;
+    }
+
+    this._willFocus(route);
+
+    this._pushRoute(makeRoute(route), options === null || options === void 0 ? void 0 : options.animated, () => {
+      this._setStackRoutes(routes => [last(routes)], () => {
+        lock.release();
+      });
+    });
+  }
+
+  present(routes, options) {
+    if (!lock.acquire()) {
+      return;
+    }
+
+    this._willFocus(Array.isArray(routes) ? last(routes) : routes);
+
+    this.setState(produce(function ({
+      stacks
+    }) {
+      stacks.push(makeStack(routes));
+    }), () => {
+      let {
+        value,
+        stacks
+      } = this.state;
+      transition(value, stacks.length - 1, options === null || options === void 0 ? void 0 : options.animated, () => {
+        lock.release();
+      });
+    });
+  }
+
+  dismiss(options) {
+    let {
+      stacks,
+      value
+    } = this.state;
+
+    if (stacks.length === 1) {
+      return;
+    }
+
+    if (lock.acquire()) {
+      this._willFocus(last(stacks[stacks.length - 2].routes));
+
+      transition(value, stacks.length - 2, options === null || options === void 0 ? void 0 : options.animated, () => {
+        this.setState({
+          stacks: stacks.slice(0, -1)
+        }, () => {
+          lock.release();
+        });
+      });
+    }
+  }
+
+  componentDidMount() {
+    this._subscription = BackHandler.addEventListener("hardwareBackPress", () => {
+      let {
+        stacks
+      } = this.state;
+
+      if (stacks.length > 1 || last(stacks).routes.length > 1) {
+        this.pop();
+        return true;
+      }
+    });
+
+    if (this.props.resetState) {
+      this.props.resetState(state => {
+        this.setState({
+          stacks: state.map(makeStack)
+        }, () => {
+          this.state.value.setValue(state.length - 1);
+          lock.release();
+        });
+      });
+    }
+  }
+
+  componentWillUnmount() {
+    if (this.props.resetState) {
+      this.props.resetState(null);
+    }
+
+    if (this._subscription) {
+      this._subscription.remove();
+    }
+  }
+
+  render() {
+    let {
+      stacks,
+      value
+    } = this.state;
+    let {
+      screenStyle,
+      screensConfig
+    } = this.props;
+    const route = last(last(stacks).routes);
+    const count = stacks.map(s => s.routes.length).reduce((acc, curr) => acc + curr, 0);
+    let Component = screensConfig[route.screen];
+    return (
+      <Provider value={this._actions}>
+        <View style={[styles.base, screenStyle]}>
+          <View style={{ backgroundColor: 'yellow', marginTop: 20 }}>
+            <Text>Rotas: {count}</Text>
+          </View>
+          <Component navigator={this._actions} {...route.props} />
+      </View>
+      {stacks.map(stack => stack.routes.map(r => {
+        let ComponentI = screensConfig[route.screen];
+        return (<View style={{position: 'absolute', top: -1000, bottom: -100}}>
+        <ComponentI navigator={this._actions} {...r.props} />
+        </View>);
+      }))}
+      </Provider>
+    );
+
+    return <Provider value={this._actions}>
+        {stacks.map((stack, i) => {
+        let style = animations.vertical(value, i);
+        return <Animated.View key={stack.key} style={[styles.base, style]}>
+              {stack.routes.map((route, j) => {
+            let Component = screensConfig[route.screen];
+            let style = animations.horizontal(stack.value, j);
+            return <Animated.View key={route.key} style={[styles.base, style, screenStyle]}>
+                    <Component navigator={this._actions} {...route.props} />
+                  </Animated.View>;
+          })}
+            </Animated.View>;
+      })}
+      </Provider>;
+  }
+
+}
+export function withNavigator(Component) {
+  class WithNavigator extends React.Component {
+    static displayName = `WithNavigator(${Component.displayName || Component.name})`;
+
+    render() {
+      return <Consumer>
+          {navigator => {
+          if (__DEV__ && !navigator) {
+            console.warn("`withNavigation` can only be used when rendered by the `Navigator`. " + "Unable to access the `navigator` prop.");
+          }
+
+          return <Component navigator={navigator} {...this.props} />;
+        }}
+        </Consumer>;
+    }
+
+  }
+
+  return hoistNonReactStatics(WithNavigator, Component);
+}
+export class NavigatorProvider extends React.Component {
+  render() {
+    return <Provider value={this.props.navigator}>{this.props.children}</Provider>;
+  }
+
+}
+const styles = StyleSheet.create({
+  base: {
+    overflow: "hidden",
+    bottom: 0,
+    left: 0,
+    position: "absolute",
+    right: 0,
+    top: 0
+  }
+});
